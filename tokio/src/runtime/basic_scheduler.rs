@@ -405,6 +405,9 @@ impl Schedule for Arc<Shared> {
                     .push_back(task);
             }
             _ => {
+                // Track that a task was scheduled from **outside** of the runtime.
+                self.stats.inc_remote_schedule_count();
+
                 // If the queue is None, then the runtime has shut down. We
                 // don't need to do anything with the notification in that case.
                 let mut guard = self.queue.lock();

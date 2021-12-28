@@ -472,7 +472,9 @@ impl Context {
 
         if core.transition_to_parked(&self.worker) {
             while !core.is_shutdown {
+                core.stats.about_to_park();
                 core = self.park_timeout(core, None);
+                core.stats.returned_from_park();
 
                 // Run regularly scheduled maintenance
                 core.maintenance(&self.worker);
@@ -492,8 +494,6 @@ impl Context {
     fn park_timeout(&self, mut core: Box<Core>, duration: Option<Duration>) -> Box<Core> {
         // Take the parker out of core
         let mut park = core.park.take().expect("park missing");
-
-        core.stats.about_to_park();
 
         // Store `core` in context
         *self.core.borrow_mut() = Some(core);
@@ -515,8 +515,6 @@ impl Context {
         if core.run_queue.is_stealable() {
             self.worker.shared.notify_parked();
         }
-
-        core.stats.returned_from_park();
 
         core
     }
@@ -726,6 +724,8 @@ impl Shared {
     }
 
     fn schedule_local(&self, core: &mut Core, task: Notified, is_yield: bool) {
+        core.stats.inc_local_schedule_count();
+
         // Spawning from the worker thread. If scheduling a "yield" then the
         // task must always be pushed to the back of the queue, enabling other
         // tasks to be executed. If **not** a yield, then there is more

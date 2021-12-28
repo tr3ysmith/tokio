@@ -13,6 +13,9 @@ use std::time::{Duration, Instant};
 /// [unstable]: crate#unstable-features
 #[derive(Debug)]
 pub struct RuntimeStats {
+    /// Number of tasks that are scheduled from outside the runtime.
+    remote_schedule_count: AtomicU64,
+    /// Tracks per-worker performance counters
     workers: Box<[WorkerStats]>,
 }
 
@@ -27,9 +30,11 @@ pub struct RuntimeStats {
 #[repr(align(128))]
 pub struct WorkerStats {
     park_count: AtomicU64,
+    noop_count: AtomicU64,
     steal_count: AtomicU64,
     poll_count: AtomicU64,
     busy_duration_total: AtomicU64,
+    local_schedule_count: AtomicU64,
 }
 
 impl RuntimeStats {
@@ -38,27 +43,47 @@ impl RuntimeStats {
         for _ in 0..worker_threads {
             workers.push(WorkerStats {
                 park_count: AtomicU64::new(0),
+                noop_count: AtomicU64::new(0),
                 steal_count: AtomicU64::new(0),
                 poll_count: AtomicU64::new(0),
                 busy_duration_total: AtomicU64::new(0),
+                local_schedule_count: AtomicU64::new(0),
             });
         }
 
         Self {
+            remote_schedule_count: AtomicU64::new(0),
             workers: workers.into_boxed_slice(),
         }
+    }
+
+    /// Returns the number of tasks scheduled from **outside** of the runtime.
+    ///
+    /// Tasks scheduled from outside of the runtime go via the runtime's
+    /// injection queue, which is usually is slower.
+    pub fn remote_schedule_count(&self) -> u64 {
+        self.remote_schedule_count.load(Relaxed)
     }
 
     /// Returns a slice containing the worker stats for each worker thread.
     pub fn workers(&self) -> impl Iterator<Item = &WorkerStats> {
         self.workers.iter()
     }
+
+    /// Increment the number of tasks scheduled externally
+    pub(crate) fn inc_remote_schedule_count(&self) {
+        self.remote_schedule_count.fetch_add(1, Relaxed);
+    }    
 }
 
 impl WorkerStats {
     /// Returns the total number of times this worker thread has parked.
     pub fn park_count(&self) -> u64 {
         self.park_count.load(Relaxed)
+    }
+
+    pub fn noop_count(&self) -> u64 {
+        self.noop_count.load(Relaxed)
     }
 
     /// Returns the number of tasks this worker has stolen from other worker
@@ -76,13 +101,35 @@ impl WorkerStats {
     pub fn total_busy_duration(&self) -> Duration {
         Duration::from_nanos(self.busy_duration_total.load(Relaxed))
     }
+
+    /// TODO
+    pub fn local_schedule_count(&self) -> u64 {
+        self.local_schedule_count.load(Relaxed)
+    }
 }
 
 pub(crate) struct WorkerStatsBatcher {
     my_index: usize,
+
+    /// Number of times the worker parked
     park_count: u64,
+
+    /// Number of times the worker woke w/o doing work.
+    noop_count: u64,
+
+    /// Number of times stolen
     steal_count: u64,
+
+    /// Number of tasks that were polled by the worker.
     poll_count: u64,
+
+    /// Number of tasks polled when the worker entered park. This is used to
+    /// track the noop count.
+    poll_count_on_last_park: u64,
+
+    /// Number of tasks that were scheduled locally on this worker.
+    local_schedule_count: u64,
+
     /// The total busy duration in nanoseconds.
     busy_duration_total: u64,
     last_resume_time: Instant,
@@ -93,8 +140,11 @@ impl WorkerStatsBatcher {
         Self {
             my_index,
             park_count: 0,
+            noop_count: 0,
             steal_count: 0,
             poll_count: 0,
+            poll_count_on_last_park: 0,
+            local_schedule_count: 0,
             busy_duration_total: 0,
             last_resume_time: Instant::now(),
         }
@@ -103,16 +153,26 @@ impl WorkerStatsBatcher {
         let worker = &to.workers[self.my_index];
 
         worker.park_count.store(self.park_count, Relaxed);
+        worker.noop_count.store(self.noop_count, Relaxed);
         worker.steal_count.store(self.steal_count, Relaxed);
         worker.poll_count.store(self.poll_count, Relaxed);
 
         worker
             .busy_duration_total
             .store(self.busy_duration_total, Relaxed);
+
+        worker.local_schedule_count.store(self.local_schedule_count, Relaxed);
     }
 
+    /// The worker is about to park.
     pub(crate) fn about_to_park(&mut self) {
         self.park_count += 1;
+
+        if self.poll_count_on_last_park == self.poll_count {
+            self.noop_count += 1;
+        } else {
+            self.poll_count_on_last_park = self.poll_count;
+        }
 
         let busy_duration = self.last_resume_time.elapsed();
         let busy_duration = u64::try_from(busy_duration.as_nanos()).unwrap_or(u64::MAX);
@@ -121,6 +181,10 @@ impl WorkerStatsBatcher {
 
     pub(crate) fn returned_from_park(&mut self) {
         self.last_resume_time = Instant::now();
+    }
+
+    pub(crate) fn inc_local_schedule_count(&mut self) {
+        self.local_schedule_count += 1;
     }
 
     #[cfg(feature = "rt-multi-thread")]
