@@ -397,12 +397,11 @@ impl Schedule for Arc<Shared> {
     fn schedule(&self, task: task::Notified<Self>) {
         CURRENT.with(|maybe_cx| match maybe_cx {
             Some(cx) if Arc::ptr_eq(self, &cx.spawner.shared) => {
-                cx.core
-                    .borrow_mut()
-                    .as_mut()
-                    .expect("core missing")
-                    .tasks
-                    .push_back(task);
+                let mut core = cx.core.borrow_mut();
+                let core = core.as_mut().expect("core missing");
+
+                core.stats.inc_local_schedule_count();
+                core.tasks.push_back(task);
             }
             _ => {
                 // Track that a task was scheduled from **outside** of the runtime.
