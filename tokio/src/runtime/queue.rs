@@ -90,7 +90,8 @@ pub(super) fn local<T: 'static>() -> (Steal<T>, Local<T>) {
 impl<T> Local<T> {
     /// Returns true if the queue has entries that can be stealed.
     pub(super) fn is_stealable(&self) -> bool {
-        !self.inner.is_empty()
+        self.inner.len() > 4
+        // !self.inner.is_empty()
     }
 
     /// Returns false if there are any entries in the queue
@@ -461,6 +462,13 @@ impl<T> Drop for Local<T> {
 }
 
 impl<T> Inner<T> {
+    fn len(&self) -> u16 {
+        let (_, head) = unpack(self.head.load(Acquire));
+        let tail = self.tail.load(Acquire);
+
+        tail.wrapping_sub(head)
+    }
+
     fn is_empty(&self) -> bool {
         let (_, head) = unpack(self.head.load(Acquire));
         let tail = self.tail.load(Acquire);
