@@ -90,8 +90,8 @@ pub(super) fn local<T: 'static>() -> (Steal<T>, Local<T>) {
 impl<T> Local<T> {
     /// Returns true if the queue has entries that can be stealed.
     pub(super) fn is_stealable(&self) -> bool {
-        self.inner.len() > 4
-        // !self.inner.is_empty()
+        // self.inner.len() > 4
+        !self.inner.is_empty()
     }
 
     /// Returns false if there are any entries in the queue
